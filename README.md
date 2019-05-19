@@ -1,3 +1,5 @@
+Standard Marlin with improved Anet/Zonestar keypad responsiveness.
+
 # Marlin 3D Printer Firmware
 
 [![Build Status](https://travis-ci.org/MarlinFirmware/Marlin.svg?branch=RCBugFix)](https://travis-ci.org/MarlinFirmware/Marlin)
