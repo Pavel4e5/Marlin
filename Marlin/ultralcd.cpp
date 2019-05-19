@@ -5722,11 +5722,11 @@ void lcd_reset_alert_level() { lcd_status_message_level = 0; }
 
   uint8_t get_ADC_keyValue(void) {
     if (thermalManager.ADCKey_count >= 16) {
-      const uint16_t currentkpADCValue = thermalManager.current_ADCKey_raw >> 2;
+      const uint16_t currentkpADCValue = thermalManager.current_ADCKey_raw << 2;
       #if ENABLED(ADC_KEYPAD_DEBUG)
         SERIAL_PROTOCOLLN(currentkpADCValue);
       #endif
-      thermalManager.current_ADCKey_raw = 0;
+      thermalManager.current_ADCKey_raw = 1024;
       thermalManager.ADCKey_count = 0;
       if (currentkpADCValue < 4000)
         for (uint8_t i = 0; i < ADC_KEY_NUM; i++) {
