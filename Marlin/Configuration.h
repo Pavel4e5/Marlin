@@ -422,7 +422,7 @@
 #define HEATER_3_MINTEMP   5
 #define HEATER_4_MINTEMP   5
 #define HEATER_5_MINTEMP   5
-#define BED_MINTEMP        5
+#define BED_MINTEMP        -30
 
 // Above this temperature the heater will be switched off.
 // This can protect components from overheating, but NOT from shorts and failures.
