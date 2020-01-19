@@ -98,7 +98,7 @@ Stepper stepper; // Singleton
 #include "../core/language.h"
 #include "../gcode/queue.h"
 #include "../sd/cardreader.h"
-#include "../Marlin.h"
+#include "../MarlinCore.h"
 #include "../HAL/shared/Delay.h"
 
 #if MB(ALLIGATOR)
@@ -117,8 +117,10 @@ Stepper stepper; // Singleton
   #include "../feature/runout.h"
 #endif
 
-#if HAS_DRIVER(L6470)
-  #include "../libs/L6470/L6470_Marlin.h"
+#if HAS_L64XX
+  #include "../libs/L64XX/L64XX_Marlin.h"
+  uint8_t L6470_buf[MAX_L6470 + 1];   // chip command sequence - element 0 not used
+  bool L64XX_OK_to_power_up = false;  // flag to keep L64xx steppers powered down after a reset or power up
 #endif
 
 #if ENABLED(POWER_LOSS_RECOVERY)
@@ -371,21 +373,17 @@ void Stepper::wake_up() {
  */
 void Stepper::set_directions() {
 
-  #if HAS_DRIVER(L6470)
-    uint8_t L6470_buf[MAX_L6470 + 1];   // chip command sequence - element 0 not used
-  #endif
-
   #if MINIMUM_STEPPER_PRE_DIR_DELAY > 0
     DELAY_NS(MINIMUM_STEPPER_PRE_DIR_DELAY);
   #endif
 
   #define SET_STEP_DIR(A)                       \
     if (motor_direction(_AXIS(A))) {            \
-      A##_APPLY_DIR(INVERT_## A##_DIR, false);  \
+      A##_APPLY_DIR(INVERT_##A##_DIR, false);   \
       count_direction[_AXIS(A)] = -1;           \
     }                                           \
     else {                                      \
-      A##_APPLY_DIR(!INVERT_## A##_DIR, false); \
+      A##_APPLY_DIR(!INVERT_##A##_DIR, false);  \
       count_direction[_AXIS(A)] = 1;            \
     }
 
@@ -425,25 +423,25 @@ void Stepper::set_directions() {
     #endif
   #endif // !LIN_ADVANCE
 
-  #if HAS_DRIVER(L6470)
+  #if HAS_L64XX
+    if (L64XX_OK_to_power_up) { // OK to send the direction commands (which powers up the L64XX steppers)
+      if (L64xxManager.spi_active) {
+        L64xxManager.spi_abort = true;                    // Interrupted SPI transfer needs to shut down gracefully
+        for (uint8_t j = 1; j <= L64XX::chain[0]; j++)
+          L6470_buf[j] = dSPIN_NOP;                         // Fill buffer with NOOPs
+        L64xxManager.transfer(L6470_buf, L64XX::chain[0]);  // Send enough NOOPs to complete any command
+        L64xxManager.transfer(L6470_buf, L64XX::chain[0]);
+        L64xxManager.transfer(L6470_buf, L64XX::chain[0]);
+      }
 
-    if (L6470.spi_active) {
-      L6470.spi_abort = true;                     // interrupted a SPI transfer - need to shut it down gracefully
-      for (uint8_t j = 1; j <= L6470::chain[0]; j++)
-        L6470_buf[j] = dSPIN_NOP;                 // fill buffer with NOOP commands
-      L6470.transfer(L6470_buf, L6470::chain[0]);  // send enough NOOPs to complete any command
-      L6470.transfer(L6470_buf, L6470::chain[0]);
-      L6470.transfer(L6470_buf, L6470::chain[0]);
+      // L64xxManager.dir_commands[] is an array that holds direction command for each stepper
+
+      // Scan command array, copy matches into L64xxManager.transfer
+      for (uint8_t j = 1; j <= L64XX::chain[0]; j++)
+        L6470_buf[j] = L64xxManager.dir_commands[L64XX::chain[j]];
+
+      L64xxManager.transfer(L6470_buf, L64XX::chain[0]);  // send the command stream to the drivers
     }
-
-    // The L6470.dir_commands[] array holds the direction command for each stepper
-
-    //scan command array and copy matches into L6470.transfer
-    for (uint8_t j = 1; j <= L6470::chain[0]; j++)
-      L6470_buf[j] = L6470.dir_commands[L6470::chain[j]];
-
-    L6470.transfer(L6470_buf, L6470::chain[0]);  // send the command stream to the drivers
-
   #endif
 
   // A small delay may be needed after changing direction
@@ -1405,6 +1403,9 @@ void Stepper::isr() {
   ENABLE_ISRS();
 }
 
+#define ISR_PULSE_CONTROL (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE)
+#define ISR_MULTI_STEPS (ISR_PULSE_CONTROL && DISABLED(I2S_STEPPER_STREAM))
+
 /**
  * This phase of the ISR should ONLY create the pulses for the steppers.
  * This prevents jitter caused by the interval between the start of the
@@ -1435,9 +1436,11 @@ void Stepper::stepper_pulse_phase_isr() {
   step_events_completed += events_to_do;
 
   // Take multiple steps per interrupt (For high speed moves)
-  bool firstStep = true;
+  #if ISR_MULTI_STEPS
+    bool firstStep = true;
+    hal_timer_t end_tick_count = 0;
+  #endif
   xyze_bool_t step_needed{0};
-  hal_timer_t end_tick_count = 0;
 
   do {
     #define _APPLY_STEP(AXIS) AXIS ##_APPLY_STEP
@@ -1487,14 +1490,14 @@ void Stepper::stepper_pulse_phase_isr() {
           // Don't step E here - But remember the number of steps to perform
           motor_direction(E_AXIS) ? --LA_steps : ++LA_steps;
         #else
-          step_needed[E_AXIS] = delta_error.e >= 0;
+          step_needed.e = delta_error.e >= 0;
         #endif
       }
     #elif HAS_E0_STEP
       PULSE_PREP(E);
     #endif
 
-    #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE) && DISABLED(I2S_STEPPER_STREAM)
+    #if ISR_MULTI_STEPS
       if (firstStep)
         firstStep = false;
       else
@@ -1514,7 +1517,7 @@ void Stepper::stepper_pulse_phase_isr() {
 
     #if DISABLED(LIN_ADVANCE)
       #if ENABLED(MIXING_EXTRUDER)
-        if (step_needed[E_AXIS]) E_STEP_WRITE(mixer.get_next_stepper(), !INVERT_E_STEP_PIN);
+        if (step_needed.e) E_STEP_WRITE(mixer.get_next_stepper(), !INVERT_E_STEP_PIN);
       #elif HAS_E0_STEP
         PULSE_START(E);
       #endif
@@ -1525,7 +1528,7 @@ void Stepper::stepper_pulse_phase_isr() {
     #endif
 
     // TODO: need to deal with MINIMUM_STEPPER_PULSE over i2s
-    #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE) && DISABLED(I2S_STEPPER_STREAM)
+    #if ISR_MULTI_STEPS
       START_HIGH_PULSE();
       AWAIT_HIGH_PULSE();
     #endif
@@ -1558,7 +1561,7 @@ void Stepper::stepper_pulse_phase_isr() {
       #endif  // !MIXING_EXTRUDER
     #endif // !LIN_ADVANCE
 
-    #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE) && DISABLED(I2S_STEPPER_STREAM)
+    #if ISR_MULTI_STEPS
       if (events_to_do) START_LOW_PULSE();
     #endif
 
@@ -1841,8 +1844,8 @@ uint32_t Stepper::stepper_block_phase_isr() {
       #endif
 
       if (
-        #if HAS_DRIVER(L6470)
-          true  // Always set direction for L6470 (This also enables the chips)
+        #if HAS_L64XX
+          true  // Always set direction for L64xx (This also enables the chips)
         #else
           current_block->direction_bits != last_direction_bits
           #if DISABLED(MIXING_EXTRUDER)
@@ -1853,6 +1856,10 @@ uint32_t Stepper::stepper_block_phase_isr() {
         last_direction_bits = current_block->direction_bits;
         #if EXTRUDERS > 1
           last_moved_extruder = stepper_extruder;
+        #endif
+
+        #if HAS_L64XX
+          L64XX_OK_to_power_up = true;
         #endif
         set_directions();
       }
@@ -1947,11 +1954,13 @@ uint32_t Stepper::stepper_block_phase_isr() {
     //const hal_timer_t added_step_ticks = hal_timer_t(ADDED_STEP_TICKS);
 
     // Step E stepper if we have steps
-    bool firstStep = true;
-    hal_timer_t end_tick_count = 0;
+    #if ISR_MULTI_STEPS
+      bool firstStep = true;
+      hal_timer_t end_tick_count = 0;
+    #endif
 
     while (LA_steps) {
-      #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE) && DISABLED(I2S_STEPPER_STREAM)
+      #if ISR_MULTI_STEPS
         if (firstStep)
           firstStep = false;
         else
@@ -1966,13 +1975,13 @@ uint32_t Stepper::stepper_block_phase_isr() {
       #endif
 
       // Enforce a minimum duration for STEP pulse ON
-      #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE)
+      #if ISR_PULSE_CONTROL
         START_HIGH_PULSE();
       #endif
 
       LA_steps < 0 ? ++LA_steps : --LA_steps;
 
-      #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE)
+      #if ISR_PULSE_CONTROL
         AWAIT_HIGH_PULSE();
       #endif
 
@@ -1985,7 +1994,7 @@ uint32_t Stepper::stepper_block_phase_isr() {
 
       // For minimum pulse time wait before looping
       // Just wait for the requested pulse duration
-      #if (MINIMUM_STEPPER_PULSE || MAXIMUM_STEPPER_RATE)
+      #if ISR_PULSE_CONTROL
         if (LA_steps) START_LOW_PULSE();
       #endif
     } // LA_steps
@@ -2925,77 +2934,78 @@ void Stepper::report_positions() {
   }
 
   void Stepper::microstep_readings() {
-    SERIAL_ECHOPGM("MS1,MS2,MS3 Pins\nX: ");
+    SERIAL_ECHOLNPGM("MS1|MS2|MS3 Pins");
     #if HAS_X_MICROSTEPS
-      SERIAL_CHAR('0' + READ(X_MS1_PIN));
-      SERIAL_CHAR('0' + READ(X_MS2_PIN));
-      #if PIN_EXISTS(X_MS3)
-        SERIAL_ECHOLN((int)READ(X_MS3_PIN));
-      #endif
+      SERIAL_ECHOPGM("X: ");
+      SERIAL_CHAR('0' + READ(X_MS1_PIN), '0' + READ(X_MS2_PIN)
+        #if PIN_EXISTS(X_MS3)
+          , '0' + READ(X_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_Y_MICROSTEPS
       SERIAL_ECHOPGM("Y: ");
-      SERIAL_CHAR('0' + READ(Y_MS1_PIN));
-      SERIAL_CHAR('0' + READ(Y_MS2_PIN));
-      #if PIN_EXISTS(Y_MS3)
-        SERIAL_ECHOLN((int)READ(Y_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(Y_MS1_PIN), '0' + READ(Y_MS2_PIN)
+        #if PIN_EXISTS(Y_MS3)
+          , '0' + READ(Y_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_Z_MICROSTEPS
       SERIAL_ECHOPGM("Z: ");
-      SERIAL_CHAR('0' + READ(Z_MS1_PIN));
-      SERIAL_CHAR('0' + READ(Z_MS2_PIN));
-      #if PIN_EXISTS(Z_MS3)
-        SERIAL_ECHOLN((int)READ(Z_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(Z_MS1_PIN), '0' + READ(Z_MS2_PIN)
+        #if PIN_EXISTS(Z_MS3)
+          , '0' + READ(Z_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E0_MICROSTEPS
       SERIAL_ECHOPGM("E0: ");
-      SERIAL_CHAR('0' + READ(E0_MS1_PIN));
-      SERIAL_CHAR('0' + READ(E0_MS2_PIN));
-      #if PIN_EXISTS(E0_MS3)
-        SERIAL_ECHOLN((int)READ(E0_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E0_MS1_PIN), '0' + READ(E0_MS2_PIN)
+        #if PIN_EXISTS(E0_MS3)
+          , '0' + READ(E0_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E1_MICROSTEPS
       SERIAL_ECHOPGM("E1: ");
-      SERIAL_CHAR('0' + READ(E1_MS1_PIN));
-      SERIAL_CHAR('0' + READ(E1_MS2_PIN));
-      #if PIN_EXISTS(E1_MS3)
-        SERIAL_ECHOLN((int)READ(E1_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E1_MS1_PIN), '0' + READ(E1_MS2_PIN)
+        #if PIN_EXISTS(E1_MS3)
+          , '0' + READ(E1_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E2_MICROSTEPS
       SERIAL_ECHOPGM("E2: ");
-      SERIAL_CHAR('0' + READ(E2_MS1_PIN));
-      SERIAL_CHAR('0' + READ(E2_MS2_PIN));
-      #if PIN_EXISTS(E2_MS3)
-        SERIAL_ECHOLN((int)READ(E2_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E2_MS1_PIN), '0' + READ(E2_MS2_PIN)
+        #if PIN_EXISTS(E2_MS3)
+          , '0' + READ(E2_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E3_MICROSTEPS
       SERIAL_ECHOPGM("E3: ");
-      SERIAL_CHAR('0' + READ(E3_MS1_PIN));
-      SERIAL_CHAR('0' + READ(E3_MS2_PIN));
-      #if PIN_EXISTS(E3_MS3)
-        SERIAL_ECHOLN((int)READ(E3_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E3_MS1_PIN), '0' + READ(E3_MS2_PIN)
+        #if PIN_EXISTS(E3_MS3)
+          , '0' + READ(E3_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E4_MICROSTEPS
       SERIAL_ECHOPGM("E4: ");
-      SERIAL_CHAR('0' + READ(E4_MS1_PIN));
-      SERIAL_CHAR('0' + READ(E4_MS2_PIN));
-      #if PIN_EXISTS(E4_MS3)
-        SERIAL_ECHOLN((int)READ(E4_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E4_MS1_PIN), '0' + READ(E4_MS2_PIN)
+        #if PIN_EXISTS(E4_MS3)
+          , '0' + READ(E4_MS3_PIN)
+        #endif
+      );
     #endif
     #if HAS_E5_MICROSTEPS
       SERIAL_ECHOPGM("E5: ");
-      SERIAL_CHAR('0' + READ(E5_MS1_PIN));
-      SERIAL_ECHOLN((int)READ(E5_MS2_PIN));
-      #if PIN_EXISTS(E5_MS3)
-        SERIAL_ECHOLN((int)READ(E5_MS3_PIN));
-      #endif
+      SERIAL_CHAR('0' + READ(E5_MS1_PIN), '0' + READ(E5_MS2_PIN)
+        #if PIN_EXISTS(E5_MS3)
+          , '0' + READ(E5_MS3_PIN)
+        #endif
+      );
     #endif
   }
 
