@@ -35,6 +35,24 @@
   #define HAS_LINEAR_E_JERK 1
 #endif
 
+// Determine which type of 'EEPROM' is in use
+#if ENABLED(EEPROM_SETTINGS)
+  // EEPROM type may be defined by compile flags, configs, HALs, or pins
+  // Set additional flags to let HALs choose in their Conditionals_post.h
+  #if NONE(FLASH_EEPROM_EMULATION, SRAM_EEPROM_EMULATION, SDCARD_EEPROM_EMULATION) && ANY(I2C_EEPROM, SPI_EEPROM, QSPI_EEPROM)
+    #define USE_WIRED_EEPROM    1
+  #else
+    #define USE_FALLBACK_EEPROM 1
+  #endif
+#else
+  #undef I2C_EEPROM
+  #undef SPI_EEPROM
+  #undef QSPI_EEPROM
+  #undef SDCARD_EEPROM_EMULATION
+  #undef SRAM_EEPROM_EMULATION
+  #undef FLASH_EEPROM_EMULATION
+#endif
+
 #ifdef TEENSYDUINO
   #undef max
   #define max(a,b) ((a)>(b)?(a):(b))
@@ -120,6 +138,19 @@
   #endif
   #define CORESIGN(n) (ANY(COREYX, COREZX, COREZY) ? (-(n)) : (n))
 #endif
+
+// Calibration codes only for non-core axes
+#if EITHER(BACKLASH_GCODE, CALIBRATION_GCODE)
+  #if IS_CORE
+    #define X_AXIS_INDEX 0
+    #define Y_AXIS_INDEX 1
+    #define Z_AXIS_INDEX 2
+    #define CAN_CALIBRATE(A,B) (A##_AXIS_INDEX == B##_INDEX)
+  #else
+    #define CAN_CALIBRATE(...) 1
+  #endif
+#endif
+#define AXIS_CAN_CALIBRATE(A) CAN_CALIBRATE(A,NORMAL_AXIS)
 
 /**
  * No adjustable bed on non-cartesians
@@ -1838,53 +1869,6 @@
 #endif // SKEW_CORRECTION
 
 /**
- * Set granular options based on the specific type of leveling
- */
-#if ENABLED(AUTO_BED_LEVELING_UBL)
-  #undef LCD_BED_LEVELING
-  #if ENABLED(DELTA)
-    #define UBL_SEGMENTED 1
-  #endif
-#endif
-#if EITHER(AUTO_BED_LEVELING_LINEAR, AUTO_BED_LEVELING_3POINT)
-  #define ABL_PLANAR 1
-#endif
-#if EITHER(AUTO_BED_LEVELING_LINEAR, AUTO_BED_LEVELING_BILINEAR)
-  #define ABL_GRID 1
-#endif
-#if ANY(AUTO_BED_LEVELING_LINEAR, AUTO_BED_LEVELING_BILINEAR, AUTO_BED_LEVELING_3POINT)
-  #define HAS_ABL_NOT_UBL 1
-#endif
-#if ANY(AUTO_BED_LEVELING_BILINEAR, AUTO_BED_LEVELING_UBL, MESH_BED_LEVELING)
-  #define HAS_MESH 1
-#endif
-#if EITHER(AUTO_BED_LEVELING_UBL, AUTO_BED_LEVELING_3POINT)
-  #define NEEDS_THREE_PROBE_POINTS 1
-#endif
-#if EITHER(HAS_ABL_NOT_UBL, AUTO_BED_LEVELING_UBL)
-  #define HAS_ABL_OR_UBL 1
-  #if DISABLED(PROBE_MANUALLY)
-    #define HAS_AUTOLEVEL 1
-  #endif
-#endif
-#if EITHER(HAS_ABL_OR_UBL, MESH_BED_LEVELING)
-  #define HAS_LEVELING 1
-  #if DISABLED(AUTO_BED_LEVELING_UBL)
-    #define PLANNER_LEVELING 1
-  #endif
-#endif
-#if EITHER(HAS_ABL_OR_UBL, Z_MIN_PROBE_REPEATABILITY_TEST)
-  #define HAS_PROBING_PROCEDURE 1
-#endif
-#if ANY(FWRETRACT, HAS_LEVELING, SKEW_CORRECTION)
-  #define HAS_POSITION_MODIFIERS 1
-#endif
-
-#if !HAS_LEVELING
-  #undef RESTORE_LEVELING_AFTER_G28
-#endif
-
-/**
  * Heater, Fan, and Probe interactions
  */
 #if FAN_COUNT == 0
@@ -2182,4 +2166,8 @@
   #if DISABLED(SHARED_SD_CARD)
     #define INIT_SDCARD_ON_BOOT
   #endif
+#endif
+
+#if !NUM_SERIAL
+  #undef BAUD_RATE_GCODE
 #endif
