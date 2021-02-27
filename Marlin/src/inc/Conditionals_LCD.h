@@ -50,6 +50,10 @@
 
   #define MINIPANEL
 
+#elif ENABLED(YHCB2004)
+
+  #define IS_ULTIPANEL 1
+
 #elif ENABLED(CARTESIO_UI)
 
   #define DOGLCD
@@ -320,6 +324,7 @@
 // FSMC/SPI TFT Panels (LVGL)
 #if ENABLED(TFT_LVGL_UI)
   #define HAS_TFT_LVGL_UI 1
+  #define SERIAL_RUNTIME_HOOK 1
 #endif
 
 // FSMC/SPI TFT Panels
@@ -817,22 +822,6 @@
       #define TOTAL_PROBING MULTIPLE_PROBING
     #endif
   #endif
-  #if ENABLED(PREHEAT_BEFORE_PROBING)
-    #ifndef PROBING_NOZZLE_TEMP
-      #define PROBING_NOZZLE_TEMP 0
-    #endif
-    #ifndef PROBING_BED_TEMP
-      #define PROBING_BED_TEMP 0
-    #endif
-  #endif
-  #if ENABLED(PREHEAT_BEFORE_LEVELING)
-    #ifndef LEVELING_NOZZLE_TEMP
-      #define LEVELING_NOZZLE_TEMP 0
-    #endif
-    #ifndef LEVELING_BED_TEMP
-      #define LEVELING_BED_TEMP 0
-    #endif
-  #endif
 #else
   // Clear probe pin settings when no probe is selected
   #undef Z_MIN_PROBE_USES_Z_MIN_ENDSTOP_PIN
@@ -1205,4 +1194,11 @@
     #define TOUCH_OFFSET_Y       XPT2046_Y_OFFSET
     #define TOUCH_ORIENTATION    TOUCH_LANDSCAPE
   #endif
+#endif
+
+#if ANY(USE_XMIN_PLUG, USE_YMIN_PLUG, USE_ZMIN_PLUG, USE_XMAX_PLUG, USE_YMAX_PLUG, USE_ZMAX_PLUG)
+  #define HAS_ENDSTOPS 1
+  #define COORDINATE_OKAY(N,L,H) WITHIN(N,L,H)
+#else
+  #define COORDINATE_OKAY(N,L,H) true
 #endif
